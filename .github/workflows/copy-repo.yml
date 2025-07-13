@@ -1,0 +1,49 @@
+name: Copy Repository Content
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repository (format: owner/repo)'
+        required: true
+        default: 'cherylisabella/codebook-draft'
+      target_repo:
+        description: 'Target repository (format: owner/repo)'
+        required: true
+        default: 'cherylisabella/codebook'
+jobs:
+  copy-repo:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+      
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+      
+      - name: Copy content from source repository
+        run: |
+          source_repo="${{ github.event.inputs.source_repo }}"
+          
+          git remote add source https://github.com/$source_repo.git
+          git fetch source
+          git subtree add --prefix=temp source main --squash
+          
+          shopt -s dotglob
+          cp -r temp/* . 2>/dev/null || true
+          cp -r temp/.* . 2>/dev/null || true
+          rm -rf temp
+          
+          git add -A
+          git commit -m "Sync content from $source_repo"
+          git remote remove source
+      
+      - name: Push changes
+        run: git push origin main
