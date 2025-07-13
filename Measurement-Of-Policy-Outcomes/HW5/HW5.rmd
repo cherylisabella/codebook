@@ -1,0 +1,383 @@
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(haven)
+library(dplyr)   
+library(tidyr)
+library(knitr)
+library(broom)
+library(ggplot2)
+library(kableExtra)
+library(gridExtra)
+fr11 <- read_dta("lfshwk_fr11.dta")
+fr12 <- read_dta("lfshwk_fr12.dta")
+```
+
+# Analysing the French Labour Force
+
+## 1. Labour Force Participation Rate, and Unemployment Rate 
+**Rates:**
+
+- Labour Force Participation Rate (p):
+$$
+\text{p} = \frac{\text{Labour Force}}{\text{Working-Age Population}} 
+$$
+
+- Unemployment Rate (u):
+$$
+\text{u} = \frac{\text{Unemployed Population}}{\text{Labour Force}} 
+$$
+
+where Labour Force = Employed population + Unemployed population, Working-Age Population: individuals aged 15-64, Unemployed Population = all individuals above a specified age (usually 15) observed in a reference period (a week) who are: without work (during the reference period), currently available for work (within two weeks), actively seeking work (in the given reference period) or have already found a job to start within the next three months.
+
+## 2. French Employment and Unemployment Rates 
+```{r echo=FALSE}
+rate <- function(data) {
+  data %>%
+    mutate(
+      empl = ifelse(
+        (traref == 1 & !is.na(traref)) |  
+        (aidref == 1 & tafref == 2 & !is.na(aidref) & !is.na(tafref)) | # family gain
+        (temp == 1 & !is.na(temp)) |  
+        (pastra == 1 & rabs %in% c(1, 3, 4, 7, 8, 10) & !is.na(pastra) & !is.na(rabs)) |  
+        (pastra == 1 & rabs == 2 & rabsp <= 365 & !is.na(pastra) & !is.na(rabs) & !is.na(rabsp)) |  
+        (pastra == 1 & rabs %in% c(5,6) & rabsp <= 91 & !is.na(pastra) & !is.na(rabs) & !is.na(rabsp)), 1, 0),
+      unempl = ifelse( 
+        (traref == 2 & dispoc == 1 & dem == 1 & pastra == 2 & !is.na(traref) & !is.na(dispoc) & !is.na(dem)) | # did not work, available, actively looking, no job attachment (ILO)
+        (traref == 2 & dispoc == 1 & dem == 1 & pastra == 1 & rabs == 11 & ultj <= 91 & !is.na(traref) & !is.na(dispoc)) | # did not work, available, actively looking, temporarily absent ; basically waiting to start (INSEE)
+        (tafref == 2 & dem == 1 & pastrb == 1 & ultj <= 91 & !is.na(traref) & !is.na(dem)), 1, 0), # temporary work absence, back in 3 months
+      active = ifelse(empl == 1 | unempl == 1, 1, 0))}
+
+fit_model <- function(data, variable, filter_condition = "TRUE") {
+  lm(as.formula(paste(variable, "~ 1")), weights = weight, data = data %>% filter(!!rlang::parse_expr(filter_condition)))}
+
+fr11 <- rate(fr11)
+fr12 <- rate(fr12)
+
+models <- list(
+  "Employment 2011" = fit_model(fr11, "empl"), "Employment 2012" = fit_model(fr12, "empl"),
+  "Unemployment 2011" = fit_model(fr11, "unempl", "ag < 65 & active == 1"),
+  "Unemployment 2012" = fit_model(fr12, "unempl", "ag < 65 & active == 1"))
+
+model_results <- models %>%
+  purrr::map_dfr(~tidy(.), .id = "Model") %>% filter(term == "(Intercept)") %>%
+  mutate(
+    Rate = ifelse(grepl("Employment", Model), "Employment", "Unemployment"),
+    Year = ifelse(grepl("2011", Model), "2011", "2012"),
+    Estimate_SE = paste0(round(estimate, 3), " (", round(std.error, 3), ")")) %>%
+  select(Rate, Year, Estimate_SE) %>% pivot_wider(names_from = Year, values_from = Estimate_SE)
+
+model_results %>%
+  kable("latex", booktabs = TRUE, caption = "Employment and Unemployment Rates by Year") %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE, position = "center")
+```
+
+**Computations:**
+
+- Employment Rate:
+  - `traref == 1`: worked at least 1 hour in the reference week
+  - `aidref == 1 & tafref == 2`: unpaid work for a relative's business (ILO)
+  - `temp == 1`: individuals aged 75+ who currently have a job
+  - `pastra == 1 & rabs %in% c(1, 3, 4, 7, 8, 10)`: temporarily absent but still employed
+  - `pastra == 1 & rabs == 2 & rabsp <= 365`: sick leave (<1 year)
+  - `pastra == 1 & rabs %in% c(5,6) & rabsp <= 91`: parental leave and other unpaid leave (<3 months)
+  
+- Unemployment Rate: 
+  - `traref == 2 & dispoc == 1 & dem == 1 & pastra == 2`: actively looking, no job (ILO)
+  - `traref == 2 & dispoc == 1 & dem == 1 & pastra == 1 & rabs == 11 & ultj <= 91`: waiting for job (/period preceding start of employment, <3 months) (INSEE)
+  - `tafref == 2 & dem == 1 & pastrb == 1 & ultj <= 91`: temporarily absent but returning to job in <3 months
+
+Overall, the decline in France's employment rate in 2012 may have been driven by the lingering effects of the Eurozone debt crisis and the austerity measures implemented by President Sarkozy's government to reduce the budget deficit.
+
+## 3. Unemployment Rate 
+The ILO and INSEE define an unemployed individual as someone who:
+
+- Is not employed (i.e., does not engage in at least 1 hour of paid or unpaid work per week).
+- Is available to start a job within 2 weeks.
+- Has actively sought work in the past 4 weeks (job search criterion).
+
+However, the ILO recognises that discouraged workers exist and are excluded from the official unemployment measure. Thus, it remains relevant to include them in the unemployment metric, as the KILM framework considers waiting to start work as part of labour underutilisation.
+
+Hence, discouraged workers who still meet availability conditions should be included. This includes those:
+
+- Waiting to start a job in <3 months (`ultj <= 91`)
+  - These individuals have a concrete job offer but haven’t started yet.
+  - ILO justification: waiting to start work as part of labour underutilisation (KILM framework).
+- Unable to look for work due to minor temporary obstacles (`nondic %in% c(4, 5, 6, 8)`)
+  - `4` → Caring for a child or family member (but willing to work).
+  - `5` → Personal obligations (e.g., administrative barriers, relocation).
+  - `6` → Temporarily sick (short-term illness preventing job search).
+  - `8` → Participating in a short-term government training program.
+  - ILO/INSEE justification: these individuals would be working if not for minor short-term barriers.
+  
+Exclusions from the unemployment measure include completely inactive individuals. This encompasses chronically sick individuals, those with disabilities that prevent them from working, and full-time students who are not actively seeking employment. People who engage in informal or part-time work but do not self-identify as employed remain excluded. This definition is statistically sound as it balances the ILO/INSEE criteria with an expansion that avoids including completely inactive individuals, thus preventing overestimation. It reflects economic reality by accurately depicting the labour market and including those facing temporary barriers to job search. 
+
+```{r echo=FALSE}
+newu <- function(data) {
+  data %>%
+    mutate(
+      unempl_optimal = ifelse(
+        empl == 0 & dispoc == 1 & (  # must NOT be employed & must be available
+          (dem == 1) |  # actively looking for a job
+          (ultj <= 91) |  # waiting to start a job
+          (nondic %in% c(6, 4, 5, 8))), 1, 0))}  # short-term unavailability exceptions
+        
+newfr11 <- newu(fr11)
+newfr12 <- newu(fr12)
+
+expanded_models <- list(
+  "Unemployment (Expanded) 2011" = fit_model(newfr11, "unempl_optimal", "ag < 65 & active == 1"),
+  "Unemployment (Expanded) 2012" = fit_model(newfr12, "unempl_optimal", "ag < 65 & active == 1"))
+
+expanded_results <- expanded_models %>%
+  purrr::map_dfr(~tidy(.), .id = "Model") %>% filter(term == "(Intercept)") %>%
+  mutate(
+    Year = ifelse(grepl("2011", Model), "2011", "2012"),
+    Estimate_SE = paste0(round(estimate, 3), " (", round(std.error, 3), ")")) %>%
+  select(Year, Estimate_SE) %>%
+  pivot_wider(names_from = Year, values_from = Estimate_SE)
+
+expanded_results %>%
+  kable("latex", booktabs = TRUE, caption = "New Unemployment Rates by Year") %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE, position = "center")
+```
+
+Comment: The decrease in unemployment rates occurred because the expanded definition reclassified some individuals previously counted as unemployed into the inactive population. Specifically, those who were not actively looking for a job (dem == 1) and not available to work within the next two weeks (dispoc == 1) were removed from the unemployment count, aligning more closely with ILO and INSEE definitions. This adjustment reduced the numerator (unemployed individuals) while keeping the denominator (labour force) relatively stable, leading to a slight decline in the unemployment rate. 
+
+## 4. Unweighted Standard Errors
+```{r echo=FALSE}
+compute_se <- function(data, variable, filter_condition) { # without weights
+  filtered <- data %>% filter(!!rlang::parse_expr(filter_condition))
+  rate <- mean(filtered[[variable]], na.rm = TRUE)  # unemployment rate
+  n <- nrow(filtered)  
+  sqrt((rate * (1 - rate)) / n)}
+
+se_weighted <- c(tidy(models[["Unemployment 2011"]])$std.error[1], tidy(models[["Unemployment 2012"]])$std.error[1]) # from (b)
+
+se_unweighted <- c(compute_se(fr11, "unempl", "ag < 65 & active == 1"), compute_se(fr12, "unempl", "ag < 65 & active == 1"))
+
+se_table <- tibble(
+  Method = c("Weighted", "Unweighted"),
+  `2011` = round(c(se_weighted[1], se_unweighted[1]), 5),
+  `2012` = round(c(se_weighted[2], se_unweighted[2]), 5))
+
+se_table %>%
+  kable("latex", booktabs = TRUE, caption = "Comparison of Unemployment Standard Errors") %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE, position = "center")
+```
+Comments: 
+
+- The unweighted standard errors are slightly smaller than the weighted ones, which is an expected result. When using unweighted estimates, we assume a simple random sample, ignoring the stratification, clustering, and differential selection probabilities inherent in the survey design which underestimates variability.
+- Conversely, weights account for the survey design and correct for unequal probabilities of selection. While this improves the accuracy of estimates by better reflecting the true population uncertainty, it also increases variability, leading to slightly larger standard errors. Ignoring the survey weights can overstate the precision of estimates, potentially leading to misleading conclusions about statistical significance and Type I errors in hypothesis testing. 
+- The 95% confidence intervals for the unemployment rates in 2011 and 2012 do not overlap, indicating a statistically significant increase. The difference of 0.006 between the rates is supported by a z-score of 4.24, well above the 1.96 threshold for 95% confidence. Therefore, we can conclude that the increase in the unemployment rate from 2011 to 2012 is statistically significant.
+
+
+## 5. Evolution of Working-Age Population 
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+compute_rates_and_changes <- function(data) {
+  data %>%
+    filter(ag >= 15 & ag <= 64) %>%
+    group_by(trim) %>%
+    summarise(
+      EmploymentRate = weighted.mean(empl, weight, na.rm = TRUE),
+      UnemploymentRate = weighted.mean(unempl, weight, na.rm = TRUE),
+      InactivityRate = 1 - (EmploymentRate + UnemploymentRate),
+      .groups = "drop") %>%
+    mutate(
+      EmploymentChange = EmploymentRate - lag(EmploymentRate),
+      UnemploymentChange = UnemploymentRate - lag(UnemploymentRate),
+      InactivityChange = InactivityRate - lag(InactivityRate))}
+
+quarterly_changes <- bind_rows(
+  compute_rates_and_changes(fr11) %>% mutate(Year = 2011), compute_rates_and_changes(fr12) %>% mutate(Year = 2012))
+
+quarterly_changes_rounded <- quarterly_changes %>%
+  mutate(across(c(EmploymentRate, UnemploymentRate, InactivityRate, 
+                  EmploymentChange, UnemploymentChange, InactivityChange), round, 3))
+
+quarterly_changes_rounded %>%
+  select(Year, trim, EmploymentRate, UnemploymentRate, InactivityRate, 
+         EmploymentChange, UnemploymentChange, InactivityChange) %>%
+  kable(format = "latex", booktabs = TRUE, 
+    caption = "Quarterly Rates and Changes for Working-Age Population",
+    col.names = c("Year", "Quarter", "Employment", "Unemployment", "Inactivity", 
+                  "Employment", "Unemployment", "Inactivity"), align = "c") %>%
+  kable_styling(latex_options = c("hold_position"), full_width = TRUE, position = "center") %>%
+  add_header_above(c(" " = 2, "Rate" = 3, "Change" = 3)) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, width = "1cm") %>% column_spec(2, width = "1cm") %>%  
+  row_spec(1:nrow(quarterly_changes_rounded), extra_css = "text-align:center")
+```
+**Between Quarter 1, 2011 and Quarter 2, 2011:**
+
+1. Employment Rate:  
+   The employment rate increased from 0.642 to 0.646, an increase of 0.004 (0.4 percentage points) → slight improvement in the employment.
+
+2. Unemployment Rate:
+   The unemployment rate decreased from 0.067 to 0.061, a decrease of 0.006 (0.6 percentage points) → reduction in unemployment during this period.
+
+3. Inactivity Rate:  
+   The inactivity rate increased slightly from 0.291 to 0.293, an increase of 0.002 (0.2 percentage points) → a small portion of the population became inactive rather than unemployed.
+
+**Between Quarter 2, 2011 and Quarter 3, 2011:**
+
+1. Employment Rate:  
+   The employment rate remained constant at 0.646 between these quarters (0.000 change) → stability in the employment level.
+
+2. Unemployment Rate:  
+   The unemployment rate increased slightly from 0.061 to 0.062, a marginal increase of 0.001 (0.1 percentage points) → minor rise in unemployment.
+
+3. Inactivity Rate:  
+   The inactivity rate decreased slightly from 0.293 to 0.292, a decrease of 0.001 (0.1 percentage points) → small movement of individuals from inactivity into the labour force.
+
+**Between Quarter 1, 2012 and Quarter 2, 2012:**
+
+1. Employment Rate:  
+   The employment rate increased from 0.642 to 0.646, an increase of 0.004 (0.4 percentage points) → employment growth.
+
+2. Unemployment Rate:  
+   The unemployment rate decreased from 0.070 to 0.066, a decrease of 0.004 (0.4 percentage points) → significant drop in unemployment.
+
+3. Inactivity Rate:  
+   The inactivity rate remained constant at 0.289 (0.000 change) → no significant shift in inactivity.
+
+```{r, results = 'asis', echo = FALSE, fig.width = 18, fig.height = 5, message=FALSE, fig.align = "center", warning=FALSE}
+quarterly_changes_rounded <- quarterly_changes_rounded %>% mutate(YearQuarter = paste(Year, trim, sep = "-"))
+
+data_plot_employment <- quarterly_changes_rounded %>%
+  select(YearQuarter, EmploymentRate) %>%
+  rename(Quarter = YearQuarter, Employment_Rate = EmploymentRate)
+
+plot_employment <- ggplot(data_plot_employment, aes(x = Quarter, y = Employment_Rate, group = 1)) +
+  geom_line(color = "#66c2a5", size = 1.2) +
+  geom_point(color = "#66c2a5", size = 2) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.001)) +  
+  labs(title = "Evolution of Employment Rate (2011-2012)",
+       x = "Year-Quarter", y = "Employment Rate") +
+  theme_minimal() +  theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(face = "bold"))
+
+data_plot_unemployment <- quarterly_changes_rounded %>%
+  select(YearQuarter, UnemploymentRate) %>% rename(Quarter = YearQuarter, Unemployment_Rate = UnemploymentRate)
+
+plot_unemployment <- ggplot(data_plot_unemployment, aes(x = Quarter, y = Unemployment_Rate, group = 1)) +
+  geom_line(color = "#e34a33", size = 1.2) +
+  geom_point(color = "#e34a33", size = 2) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.001)) +  
+  labs(title = "Evolution of Unemployment Rate (2011-2012)",
+       x = "Year-Quarter", y = "Unemployment Rate") +
+  theme_minimal() +  theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(face = "bold"))
+
+data_plot_inactivity <- quarterly_changes_rounded %>%
+  select(YearQuarter, InactivityRate) %>%
+  rename(Quarter = YearQuarter, Inactivity_Rate = InactivityRate)
+
+plot_inactivity <- ggplot(data_plot_inactivity, aes(x = Quarter, y = Inactivity_Rate, group = 1)) +
+  geom_line(color = "#7fb3d5", size = 1.2) +
+  geom_point(color = "#7fb3d5", size = 2) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.001)) +  
+  labs(title = "Evolution of Inactivity Rate (2011-2012)",
+       x = "Year-Quarter", y = "Inactivity Rate") +
+  theme_minimal() +  theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(face = "bold"))
+
+grid.arrange(plot_employment, plot_unemployment, plot_inactivity, ncol = 3)
+```
+**Summary**:
+
+- Between quarters 1 and 2 of 2011, employment improved and unemployment fell, with a slight rise in inactivity.  
+- Between quarters 2 and 3 of 2011, the labour market remained stable, with marginal shifts.  
+- Between quarters 1 and 2 of 2012, employment increased and unemployment decreased notably, while inactivity remained constant.
+
+## 6. Observations for 2012 
+```{r echo=FALSE}
+lfs_2012 <- fr12 %>%
+  filter(ag >= 15 & ag <= 64, !is.na(ddipl)) %>% 
+  mutate(lfp = if_else(empl == 1 | unempl == 1, 1, 0))
+
+rates_by_gender <- lfs_2012 %>%
+  group_by(sexe) %>%
+  summarise(UnemploymentRate = weighted.mean(unempl, weight, na.rm = TRUE) * 100,
+    LFPR = weighted.mean(lfp, weight, na.rm = TRUE) * 100) %>%
+  mutate(Gender = if_else(sexe == 1, "Male", "Female")) %>%
+  select(Gender, UnemploymentRate, LFPR)
+
+rates_by_age <- lfs_2012 %>%
+  mutate(AgeGroup = case_when(
+    ag < 25 ~ "15-24",
+    ag >= 25 & ag < 50 ~ "25-49",
+    ag >= 50 ~ "50-64")) %>%
+  group_by(AgeGroup) %>%
+  summarise(UnemploymentRate = weighted.mean(unempl, weight, na.rm = TRUE) * 100,
+    LFPR = weighted.mean(lfp, weight, na.rm = TRUE) * 100)
+
+rates_by_qualification <- lfs_2012 %>%
+  group_by(ddipl) %>%
+  summarise(UnemploymentRate = weighted.mean(unempl, weight, na.rm = TRUE) * 100,
+    LFPR = weighted.mean(lfp, weight, na.rm = TRUE) * 100)
+
+rates_by_gender_table <- rates_by_gender %>%
+  mutate(UnemploymentRate = round(UnemploymentRate, 2), LFPR = round(LFPR, 2)) %>%
+  kable(format = "latex", booktabs = TRUE, 
+    caption = "Unemployment and Labor Force Participation Rates by Gender",
+    col.names = c("Group", "Unemployment Rate (%)", "Labor Force Participation Rate (%)"), align = "c") %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE, position = "center")
+
+rates_by_age_table <- rates_by_age %>%
+  mutate(UnemploymentRate = round(UnemploymentRate, 2), LFPR = round(LFPR, 2)) %>%
+  kable(format = "latex", booktabs = TRUE, 
+    caption = "Unemployment and Labor Force Participation Rates by Age Group",
+    col.names = c("Group", "Unemployment Rate (%)", "Labor Force Participation Rate"), align = "c") %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE, position = "center")
+
+rates_by_qualification_table <- rates_by_qualification %>%
+  mutate(UnemploymentRate = round(UnemploymentRate, 2), LFPR = round(LFPR, 2)) %>%
+  kable(format = "latex", booktabs = TRUE, 
+    caption = "Unemployment and Labor Force Participation Rates by Qualification",
+    col.names = c("Group", "Unemployment Rate (%)", "Labor Force Participation Rate (%)"), align = "c") %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE, position = "center")
+
+rates_by_gender_table
+```
+**Differences by Gender:**
+
+- Unemployment Rates:
+  - The higher unemployment rate among men could indicate greater exposure to sectors with higher job volatility (e.g., manufacturing, construction). By contrast, women may disproportionately work in sectors like healthcare or education, which tend to be more stable.
+- Labor Force Participation Rates:
+  - Male participation is much higher (75.59%) than female participation (66.90%).
+  - The gap here could reflect the enduring impact of traditional gender roles in France, where women may prioritise caregiving responsibilities or face structural barriers to full-time labour market engagement, such as inadequate childcare facilities or wage gaps.
+  
+```{r echo=FALSE}
+rates_by_age_table
+```
+**Differences by Age:**
+
+- Unemployment Rates:
+  - Youth unemployment (15-24) is significantly higher due to structural barriers, including limited work experience, mismatched skills, and the prevalence of temporary or low-quality jobs. For older workers (50-64), the low unemployment rate is consistent with established career stability and a reduced likelihood of job transitions.
+  - ILO recognises that the younger cohort often includes students or trainees, which partially explains the high unemployment rate among youth. Older workers nearing retirement may also be classified as inactive rather than unemployed if they leave the workforce entirely.
+  
+- Labor Force Participation Rates:
+  - Participation among youth is lower due to commitments to education or training. The prime working-age group (25-49) has the highest participation, reflecting peak employment years. Participation declines for those aged 50-64 as workers retire early or face health-related challenges.
+  
+```{r echo=FALSE}
+rates_by_qualification_table
+```
+**Differences by Qualification:**
+
+- Unemployment Rates:
+  - Individuals with higher qualifications (e.g., Diplôme supérieur à baccalauréat + 2 ans) experience much lower unemployment rates due to greater access to specialised, high-demand roles and better job stability. In contrast, individuals with no qualifications (Group 7) face significantly higher unemployment rates, as they are often limited to low-skill jobs that are declining due to automation and outsourcing.
+  - INSEE data supports the correlation between educational attainment and employment opportunities, where qualifications beyond the baccalauréat greatly reduce unemployment risk. Group 7's high unemployment reflects structural issues, such as inadequate skill alignment with labour market demands.
+
+- Labor Force Participation Rates:
+  - Participation is highest among those with advanced education, as higher qualifications translate to higher earning potential and a stronger motivation to remain in the labour force. The sharp drop for Group 6 reflects challenges faced by individuals with minimal secondary education, who may be discouraged from seeking work or lack skills for sustainable employment.
+  - INSEE highlights that those with no formal qualifications (Group 7) or minimal secondary education (Group 6) are more likely to drop out of the labour force entirely, often shifting to informal sectors or inactivity.
+
+
+**Cross-Category Analysis:**
+
+- Younger Workers: Young individuals with qualifications below Baccalauréat (Groups 5-7) are most vulnerable to both high unemployment and low participation. This highlights the need for accessible vocational training and apprenticeship programs.
+- Older Workers: Older men in Groups 6 and 7 often leave the labour force early, reflecting a lack of retraining opportunities and high job demands in low-skill sectors. 
+- Women in Qualification Groups 6 and 7: Structural barriers such as childcare responsibilities and limited access to high-quality jobs further disadvantage low-qualified women. 
+
+
+\newpage
+# Code
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```

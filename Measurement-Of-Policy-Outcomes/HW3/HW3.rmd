@@ -1,0 +1,521 @@
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(haven)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(stargazer)
+library(cowplot)
+library(gridExtra)
+library(ggrepel)
+library(scales)
+silc <- readRDS("silc.rds")
+hdi <- read_dta("hdi_2019.dta")
+us_thresholds <- read_excel("thresh06.xlsx")
+```
+
+# Exercise 1 - Poverty
+
+## 1.2 Rates of poverty using US and European thresholds
+
+**1.2.1a U.S. poverty lines (usthr06) in local currencies**
+
+```{r, echo=FALSE}
+# fixed conversion rates for specific countries
+conversion_rates <- c("UK" = 0.697, "ES" = 0.737, "DK" = 8.295)
+
+# convert US poverty line to local currency based on fixed conversion rates
+silc <- silc %>%
+  mutate(
+    local_poverty_line = case_when(
+      hb020 == "UK" ~ usthr06 * conversion_rates["UK"], hb020 == "ES" ~ usthr06 * conversion_rates["ES"], hb020 == "DK" ~ usthr06 * conversion_rates["DK"], TRUE ~ NA_real_))
+
+summary_stats <- silc %>%
+  group_by(hb020) %>%  
+  summarise(
+    min_poverty_line = min(local_poverty_line, na.rm = TRUE), max_poverty_line = max(local_poverty_line, na.rm = TRUE),
+    median_poverty_line = median(local_poverty_line, na.rm = TRUE), mean_poverty_line = mean(local_poverty_line, na.rm = TRUE),
+    sd_poverty_line = sd(local_poverty_line, na.rm = TRUE), count = n())
+
+summary_stats %>%
+  mutate_if(is.numeric, ~ round(., 2)) %>% 
+  rename(
+    Country = hb020,
+    "Min Poverty Line" = min_poverty_line,
+    "Max Poverty Line" = max_poverty_line,
+    "Median Poverty Line" = median_poverty_line,
+    "Mean Poverty Line" = mean_poverty_line,
+    "Standard Deviation" = sd_poverty_line,
+    "Observations" = count
+  ) %>%
+  kable("latex", booktabs = TRUE, caption = "Summary Statistics for Poverty Lines by Country (in Local Currency)") %>%
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down")) %>%
+  add_header_above(c(" " = 1, "Poverty Line Statistics" = 6))
+```
+
+-   Denmark (DK):
+    -   Converted Poverty Lines: The minimum poverty line is around 80,204 DKK, while the maximum reaches 293,161 DKK. The median poverty line is approximately 111,983 DKK.
+    -   Mean and Standard Deviation: The average poverty line in Denmark is around 126,528 DKK, with a high standard deviation of 37,061 DKK, indicating a wide spread in poverty lines within the country.
+    -   Observations: Denmark has one of the highest converted poverty lines, largely due to its high exchange rate (8.295 DKK per USD). This reflects Denmark's generally high cost of living and wage levels. The significant spread (high standard deviation)
+        could imply considerable economic disparity or variations across regions or household types.
+-   Spain (ES):
+    -   Converted Poverty Lines: In Spain, the minimum poverty line is approximately 7,126 EUR, with a maximum of 32,906 EUR and a median of 11,622 EUR.
+    -   Mean and Standard Deviation: The average poverty line is around 11,896 EUR with a standard deviation of 3,646 EUR.
+    -   Observations: Spain's converted poverty lines are substantially lower than Denmark's. This aligns with the lower exchange rate of 0.737 EUR per USD, and potentially a lower cost of living compared to Nordic countries. The relatively moderate standard deviation suggests less variation in poverty lines across different regions or demographic groups.
+-   United Kingdom (UK):
+    -   Converted Poverty Lines: In the UK, the poverty line ranges from 6,740 GBP (minimum) to 31,120 GBP (maximum), with a median of 9,410 GBP.
+    -   Mean and Standard Deviation: The average poverty line is 10,102 GBP, with a standard deviation of 3,170 GBP.
+    -   Observations: The UK’s poverty line values are intermediate compared to Denmark and Spain. The exchange rate of 0.697 GBP per USD influences this. The standard deviation here indicates a moderate spread, which may point to some regional or economic variations within the country.
+
+**1.2.1b US-defined household’s gross income**
+
+\begin{center} $Gross\ income\ (U.S) = ((hy020 + hy120g + hy130g + hy140g - hy070g) * hx010)$ \end{center}
+
+-   In-kind transfers such as food stamps or the consumption of public
+    goods are not included.
+-   Housing allowances(HY070G) and capital gains or losses are also not
+    included in the income aggregate.
+    
+- Gross income should include all household income components before tax and other deductions.
+- Taxes on wealth (HY120G) and income/social contributions (HY140G) are included here to represent gross income accurately. However, inter-household cash transfers (HY130G) do not directly contribute to household income, as they are payments made to other households rather than income earned.
+- Housing allowances (HY070G) and capital gains or losses are excluded from this aggregate, as they are not part of disposable or gross income in this context.
+  - Housing allowances typically represent non-cash, in-kind assistance provided by the government or institutions to support housing needs, especially for low-income households.
+  - In the U.S., such in-kind transfers (like food stamps, rental assistance, or other public benefits) are not included in gross income calculations because they do not constitute direct, earned income or cash that the household can spend freely.
+  - If HY070G is included, households receiving housing assistance would appear to have higher gross income than they effectively do. This can distort comparisons between households that do and do not receive housing support, as well as affect measures of poverty and eligibility for other assistance programs.
+  - Therefore, excluding HY070G aligns with the standard practice of only counting discretionary, cash-based earnings in gross income.
+
+```{r, echo=FALSE}
+# calculate gross income in euros, and convert to local currency based on country
+silc <- silc %>% mutate(gross_income_us = ((hy020 + hy120g + hy130g + hy140g - hy070g) * hx010)) 
+
+# summary statistics df
+income_summary <- as.list(summary(silc$gross_income_us))
+income_summary_df <- data.frame(income_summary)
+colnames(income_summary_df) <- c("Min", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max")
+
+kable(income_summary_df, caption = "Summary Statistics for Gross Income in Local Currency")
+```
+
+**1.2.1c Weighted Household Poverty Rates (U.S.)**
+
+```{r, echo=FALSE}
+# dummy variable for households below the US poverty threshold
+silc <- silc %>%
+  filter(!is.na(gross_income_us) & !is.na(local_poverty_line)) %>%  
+  mutate(is_poor_us = ifelse(gross_income_us < local_poverty_line, 1, 0)) 
+
+# household poverty rate using only household weights
+poverty_rate_household <- silc %>%
+  group_by(hb020) %>%
+  summarise(
+    pct_poor_household = sum(is_poor_us * db090, na.rm = TRUE) / sum(db090, na.rm = TRUE) * 100, 
+    se_poor_household = sqrt(sum(db090 * (is_poor_us - pct_poor_household/100)^2, na.rm = TRUE) / sum(db090, na.rm = TRUE)) * 100)
+
+# table
+poverty_rate_household %>%
+  mutate(
+    pct_poor_household = round(pct_poor_household, 2),
+    se_poor_household = round(se_poor_household, 2)
+  ) %>% 
+  rename(
+    Country = hb020,
+    "Poverty Rate (%)" = pct_poor_household, "Standard Error (%)" = se_poor_household
+  ) %>%
+  kable("latex", booktabs = TRUE, caption = "Household Poverty Rate and Standard Error by Country (U.S. Threshold)") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+**1.2.1d Weighted Individual Poverty Rates (U.S.)**
+
+```{r, echo=FALSE}
+silc <- silc %>%
+  mutate(individual_weight = n_pers * db090)
+
+# calculate the individual poverty rate for each country using the adjusted individual weights
+poverty_rate_individual <- silc %>%
+  group_by(hb020) %>%
+  summarise(
+    pct_poor_individual = sum(is_poor_us * individual_weight, na.rm = TRUE) / sum(individual_weight, na.rm = TRUE) * 100,
+    se_poor_individual = sqrt(sum(db090 * (is_poor_us - pct_poor_individual/100)^2, na.rm = TRUE) / sum(db090, na.rm = TRUE)) * 100)
+
+poverty_rate_individual %>%
+  mutate_if(is.numeric, ~ round(., 2)) %>% 
+  rename(Country = hb020, "Poverty Rate (%)" = pct_poor_individual, "Standard Error (%)" = se_poor_individual
+  ) %>%
+  kable("latex", booktabs = TRUE, caption = "Individual Poverty Rate by Country (US Threshold)") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+The individual poverty rate is typically higher than the household poverty rate because Household Poverty Rate counts each household equally, regardless of size, while Individual Poverty Rate adjusts for household size, meaning larger households below the poverty line have a bigger impact on this rate.
+
+### Explanation of Differences between Household and Individual Poverty Rates
+
+The difference between these two rates reflects the presence of larger households among the poor population:
+
+-   If poorer households tend to be larger, the individual poverty rate will be higher than the household poverty rate.
+-   If poorer households tend to be smaller, the individual poverty rate may be closer to or lower than the household poverty rate.
+
+Overall:
+
+-   Denmark (DK): The individual poverty rate (3.06%) is double the household poverty rate (1.59%), suggesting that poorer households in Denmark tend to be larger, which increases the individual rate. This means there may be more dependents (e.g., children) or multiple family members living in poor households, resulting in a higher individual poverty rate. This is consistent with Denmark’s strong social policies that may reduce the number of households in poverty but still leave larger family groups vulnerable.
+-   Spain (ES): The household poverty rate is higher than the individual poverty rate, suggesting that poverty is concentrated in smaller households. With fewer people per household, the individual poverty rate is lower because fewer individuals are impacted despite a high number of households being classified as poor. This may reflect Spain’s higher rates of single-adult or elderly households, which are more likely to fall below the poverty line.
+-   United Kingdom (UK): Similar to Spain, the household poverty rate is slightly higher than the individual poverty rate. This difference suggests that poor households in the UK also tend to be relatively smaller in size, meaning that fewer individuals are impacted by poverty within each poor household. The UK’s poverty rates reflect a more even distribution of household sizes among those experiencing poverty.
+
+### Potential Explanations Supported by Literature
+
+1.  Household Size and Poverty:
+    -   Larger households are often associated with higher poverty rates because they have more dependents/people per household and face greater financial pressure on limited income. Research indicates that larger families or multi-generational households are more affected by poverty due to the higher costs per capita, especially in economies where child or dependent benefits are lower. (Banerjee and Duflo, 2008; Steward et al., 2023).
+2.  Differences in Welfare and Social Policies:
+    -   Countries like Denmark and Spain tend to have more robust social safety nets than the UK, which can affect poverty rates. Denmark, for instance, has a well-developed welfare state that reduces the economic impact of poverty, even for larger families (Kangas and Palme, 2020). This may explain the relatively low poverty rates overall in Denmark and Spain.
+3.  Cultural and Socioeconomic Factors:
+    -   In Southern Europe, extended family systems are common, meaning multiple generations often live together and support each other, which may contribute to lower poverty rates (or the perception thereof) in countries like Spain. Conversely, the UK has more nuclear family structures, which might reflect higher poverty rates, as these families are more vulnerable to income fluctuations without extended family support.
+4.  Income Distribution and Inequality:
+    -   High levels of income inequality often correlate with higher individual poverty rates, especially in countries with limited redistributive policies. The UK generally has higher income inequality compared to Denmark and Spain, which could contribute to a higher proportion of poor households and individuals in the UK.
+5.  Single-Person Households and Elderly Poverty:
+    -   In countries like Spain, where smaller households might be affected by poverty, single-person or elderly households can drive up the household poverty rate while keeping the individual poverty rate lower. Literature shows that single-adult or elderly households are especially vulnerable to poverty, as they often rely on limited pensions or welfare and lack the economic support of other household members.
+
+**1.2.2a Equivalised Household Size and Adult-equivalent Income**
+According to Eurostat, equivalised disposable income is calculated by dividing the household’s total disposable income by the equivalised household size, where each household member is assigned a weight:
+
+-   1.0 for the first adult,
+-   0.5 for each additional adult,
+-   0.3 for each child under 14.
+
+Therefore, the equivalised household size (EHS) is given by:
+$EHS=1+0.5×(n_{adults}−1)+0.3×n_{children}$, where $nadults$ is the number of adults (14 years or older), and $nchildrennchildren$ is the number of children (under 14 years).
+
+Having found EHS, the adult-equivalent income (AEI) can be calculated as
+$AEI = \frac{hy020}{EHS}$.
+
+```{r, echo=FALSE}
+# equivalised household size
+silc <- silc %>%
+  mutate(equivalised_household_size = 1 + 0.5 * (n_pers_over_14 - 1) + 0.3 * n_pers_under_14)
+
+# adult-equivalent income
+silc <- silc %>% mutate(adult_equivalent_income = hy020 / equivalised_household_size)
+```
+
+**1.2.2b Household’s Adult-Equivalent Income** 
+Since the EU defines the poverty threshold as 60% of the national median adult-equivalent income, the median adult-equivalent income and poverty thresholds are as follows:
+
+```{r, echo=FALSE}
+# median adult-equivalent income for each country
+median_aei <- silc %>%
+  group_by(hb020) %>%
+  summarise(median_aei = median(adult_equivalent_income, na.rm = TRUE))
+
+# EU poverty threshold = 60% of median adult-equivalent income
+poverty_threshold_eu <- median_aei %>%
+  mutate(eu_poverty_threshold = median_aei * 0.6)
+
+# table
+poverty_threshold_eu %>% mutate_if(is.numeric, ~ round(., 0)) %>%  
+  mutate_if(is.numeric, ~ comma(.)) %>%  
+  rename( Country = hb020, "Median AEI" = median_aei, "Poverty Threshold" = eu_poverty_threshold ) %>% 
+  kable("latex", booktabs = TRUE, caption = "Median Adult-Equivalent Income and EU Poverty Threshold by Country") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+**1.2.2c Dummy Variables**
+
+```{r, echo=FALSE, fig.dim=c(3,2)}
+# merge poverty threshold into the main dataset by country
+silc <- silc %>% left_join(poverty_threshold_eu, by = "hb020")
+
+# create a dummy variable for households below the EU poverty threshold
+silc <- silc %>% mutate(is_poor_eu = ifelse(adult_equivalent_income < eu_poverty_threshold, 1, 0))
+
+# table - count households below the poverty threshold
+ silc %>%
+  group_by(hb020) %>%
+  summarise(Households_Poor_EU = sum(is_poor_eu, na.rm = TRUE), Total_Households = n(), Percentage_Poor_EU = (Households_Poor_EU / Total_Households) * 100) %>%
+  rename(Country = hb020) %>%
+  mutate_if(is.numeric, ~ round(., 2)) %>% 
+  kable("latex", booktabs = TRUE, caption = "Households Below EU Poverty Threshold by Country") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+**1.2.2d Weighted Household and Individual Poverty Rates (EU)**
+
+```{r, echo=FALSE}
+# household poverty rate 
+poverty_rate_household_eu <- silc %>% group_by(hb020) %>% summarise(pct_poor_household_eu = mean(is_poor_eu, na.rm = TRUE) * 100)
+
+# individual poverty rate
+# individual weight based on household size for individual poverty rate
+silc <- silc %>%
+  mutate(individual_weight = n_pers * db090)
+
+# individual poverty rate b
+poverty_rate_individual_eu <- silc %>%
+  group_by(hb020) %>%
+  summarise(pct_poor_individual_eu = sum(is_poor_eu * individual_weight, na.rm = TRUE) / sum(individual_weight, na.rm = TRUE) * 100)
+
+# table
+poverty_rate_household_eu %>%
+  left_join(poverty_rate_individual_eu, by = "hb020") %>%
+  mutate_if(is.numeric, ~ round(., 2)) %>% 
+  rename(Country = hb020, "Household Poverty Rate (%)" = pct_poor_household_eu, "Individual Poverty Rate (%)" = pct_poor_individual_eu
+  ) %>%
+  kable("latex", booktabs = TRUE, caption = "Household and Individual Poverty Rates by EU Definition") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+## 1.3 Differences in Poverty Rates by US vs. EU Definitions
+
+Mathematical difference in US and EU poverty thresholds calculations:
+
+-   US Poverty Threshold: An absolute measure, comparing gross income against a fixed threshold adjusted for purchasing power.
+    -   Since it is an absolute measure, it does not vary across countries. This results in generally higher poverty rates under the EU definition, especially in countries with high income inequality, as those below the 60% median threshold may still have incomes that meet basic needs but are low relative to the national standard.
+-   EU Poverty Threshold: A relative measure, set at 60% of the national median adult-equivalent income, adjusting for local income distribution.
+    -   Since this is a relative measure, it is sensitive to the country's median income.
+
+# Exercise 2 - Human Development Index (HDI)
+
+## 2.1 HDI: Old vs. New Definition
+
+**2.1a Functional Form (Arithmetic vs. Geometric Mean)**
+
+-   Old HDI: Uses an arithmetic mean, which doesn’t account for disparities between components (health, education, income).
+-   New HDI: Uses a geometric mean, which penalizes imbalances, as a low score in one dimension reduces the overall index more than in the
+    arithmetic mean.
+
+**2.1b Education Indicators**
+
+-   Old HDI: Combines literacy rate (2/3 weight) and gross enrollment (1/3 weight).
+-   New HDI: Combines average years of schooling and expected years of schooling, providing a broader measure of educational attainment.
+
+**2.1c Income Indicator**
+
+-   Old HDI: Based on logarithmic GDP per capita.
+-   New HDI: Uses Gross National Income (GNI) per capita, which adjusts for income earned by nationals abroad and offers a more comprehensive measure of income.
+
+## 2.2 Old and New HDIs + Scatterplot
+
+Given the data in hdi_2019, we calculate the HDI values using both definitions and create a scatterplot.
+
+```{r, echo=FALSE, fig.align='center', fig.dim=c(8,4), warning=FALSE, message=FALSE}
+# old HDI calculation
+hdi <- hdi %>%
+  mutate(HDI_old = (le - 20) / (85 - 20) / 3 +
+                  (2/3 * (al / 100) + 1/3 * (ge / 100)) / 3 +
+                  (log(gdp) - log(100)) / (log(40000) - log(100)) / 3)
+
+# new HDI calculation
+hdi <- hdi %>%
+  mutate(HDI_new = ((le - 20) / (85 - 20))^(1/3) *
+                   ((0.5 * mys / 15 + 0.5 * eys / 18))^(1/3) *
+                   ((log(gni) - log(100)) / (log(75000) - log(100)))^(1/3))
+
+# select representative countries for labeling
+label_countries <- hdi %>%
+  filter((HDI_old < 0.6 & HDI_new < 0.6) |       # Bottom-left
+         (HDI_old > 0.7 & HDI_old < 0.8 &        # Middle
+          HDI_new > 0.7 & HDI_new < 0.8) |
+         (HDI_old > 0.9 & HDI_new > 0.9)) %>%    # Top-right
+  arrange(desc(HDI_new)) %>%
+  group_by(case_when(
+    HDI_old < 0.5 & HDI_new < 0.5 ~ "Bottom-left",
+    HDI_old > 0.7 & HDI_old < 0.8 & HDI_new > 0.7 & HDI_new < 0.8 ~ "Middle",
+    HDI_old > 0.9 & HDI_new > 0.9 ~ "Top-right"
+  )) %>%
+  slice_head(n = 5) %>% # Select 5 countries from each region
+  ungroup()
+
+# scatterplot of Old vs. New HDI with selective country labels
+ggplot(hdi, aes(x = HDI_old, y = HDI_new)) +
+  geom_point(color = "#a0b116") +  # Points for each country
+  geom_text_repel(data = label_countries, aes(label = country), size = 3, max.overlaps = Inf) +  # labels for selected countries
+  labs(x = "Old HDI", y = "New HDI", title = "Comparison of Old and New HDI by Country") +
+  theme_minimal()
+```
+
+Interpretation of results:
+
+-   Generally, there is a strong positive correlation, indicating that countries with higher old HDI scores tend to have higher new HDI scores as well.
+-   However, the differences in calculation methods lead to slight variations between the two HDI scores. The new HDI calculation includes factors that may cause smaller or less developed countries to have relatively lower scores compared to their old HDI.
+-   Countries at the bottom left, like Chad and Niger, show low scores on both old and new HDI, indicating lower development levels. Conversely, countries with high scores, such as Norway and Australia, are located at the top right of the plot, reflecting high development levels.
+-   The adjusted HDI metrics from the new HDI calculations may slightly affect rankings but still maintain the overall distribution of development levels across countries.
+
+## 2.3 Test for Penalization of Uneven Development in New HDI
+
+To test whether the new HDI formula penalizes countries with uneven development across its components, we’ll calculate the standard deviation of the three components for each country and check the correlation of this standard deviation with the old and new HDI values.
+The old HDI used an arithmetic mean, which doesn’t penalize imbalances, while the new HDI uses a geometric mean, which does. A higher correlation with the new HDI would indicate penalization.
+
+```{r, echo=FALSE}
+# calculate components for Old and New HDI
+hdi <- hdi %>%
+  # Old HDI components
+  mutate(h_old = (le - 20) / (85 - 20),
+         edu_old = (2/3) * (al / 100) + (1/3) * (ge / 100),
+         in_old = (log(gdp) - log(100)) / (log(40000) - log(100))) %>%
+  
+  # new HDI components
+  mutate(h_new = (le - 20) / (85 - 20),
+         edu_new = (0.5 * mys / 15) + (0.5 * eys / 18),
+         in_new = (log(gni) - log(100)) / (log(75000) - log(100)))
+
+# calculate the standard deviation of components for each HDI definition
+hdi <- hdi %>%
+  mutate(sd_old = apply(select(., h_old, edu_old, in_old), 1, sd),
+         sd_new = apply(select(., h_new, edu_new, in_new), 1, sd))
+
+# calculate Old and New HDI values
+hdi <- hdi %>%
+  mutate(HDI_old = (h_old + edu_old + in_old) / 3,
+         HDI_new = (h_new * edu_new * in_new)^(1/3))
+
+# calculate the correlation between standard deviation and HDI scores
+corr_old = cor(hdi$sd_old, hdi$HDI_old)
+corr_new = cor(hdi$sd_new, hdi$HDI_new)
+```
+
+```{r, fig.align='center', fig.height=2, echo=FALSE, message=FALSE}
+# scatterplot for Old HDI vs. Standard Deviation of Components
+plot_old <- ggplot(hdi, aes(x = sd_old, y = HDI_old)) +
+  geom_point(color = "#2c7fb8") +
+  geom_smooth(method = "lm", se = FALSE, color = "darkblue", linetype = "dashed") +
+  labs(x = "S.D. of Components (Old HDI)",
+       y = "Old HDI Score",
+       title = "Old HDI") +
+  theme_minimal()
+
+# scatterplot for New HDI vs. Standard Deviation of Components
+plot_new <- ggplot(hdi, aes(x = sd_new, y = HDI_new)) +
+  geom_point(color = "#f03b20") +
+  geom_smooth(method = "lm", se = FALSE, color = "darkred", linetype = "dashed") +
+  labs(x = "S.D. of Components (New HDI)",
+       y = "New HDI Score",
+       title = "New HDI") +
+  theme_minimal()
+
+grid.arrange(plot_old, plot_new, ncol = 2, widths = c(2, 2))
+```
+
+```{r, echo=FALSE}
+# df for correlation results
+correlation_results <- data.frame(
+  Metric = c("Correlation between Standard Deviation and Old HDI", "Correlation between Standard Deviation and New HDI"),
+  Correlation_Value = c(corr_old, corr_new))
+
+# table 
+correlation_results %>%
+  mutate_if(is.numeric, ~ round(., 2)) %>% 
+  kable("latex", booktabs = TRUE, caption = "Correlation Results for Old and New HDI") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+
+```
+
+Interpretation of Correlation Results
+
+-   Old HDI Correlation (corr_old = -0.5845): The relatively moderate negative correlation between the standard deviation of HDI components (sd_old) and the old HDI score (HDI_old) suggests that, while there is some penalization for uneven development in the old HDI, it is not very strong. The old HDI uses an arithmetic mean, which does not heavily penalize countries with variability across health, education, and income. For example, a country could achieve a high HDI score if one component is high enough to offset a lower component, which reduces the impact of uneven development.
+-   New HDI Correlation (corr_new = -0.7377): The stronger negative correlation in the new HDI indicates that countries with higher variability across components tend to have lower HDI scores. This is consistent with the geometric mean used in the new HDI, which emphasises balance among the components. When one component (e.g., education) is much lower than others (e.g., health or income), the geometric mean reduces the overall HDI score more significantly than the arithmetic mean would. This stronger negative correlation
+    confirms that the new HDI penalizes countries with uneven development more than the old HDI.
+
+The negative correlation values, especially the stronger negative correlation with the new HDI, confirm that the new HDI penalizes uneven development more than the old HDI. The geometric mean used in the new HDI formula reduces the HDI score when there is an imbalance across components, unlike the old HDI’s arithmetic mean. This penalisation effect aligns with the goal of the new HDI to present a balanced view of human development by emphasizing that improvements should be balanced
+across all three components.
+
+## 2.4 Policy Considerations
+
+**2.4a Policy to maximize the average value of the HDI**
+
+```{r, echo=FALSE}
+# rank countries by GNI to split them into 50% poorest and 50% richest
+hdi <- hdi %>%
+  arrange(gni) %>%
+  mutate(rank = row_number(),
+         group = ifelse(rank <= n() / 2, "poorest", "richest"))
+
+# increase life expectancy by 3 years for the poorest and richest groups separately
+hdi <- hdi %>%
+  mutate(LEi_poor_increase = ifelse(group == "poorest", le + 3, le),
+         LEi_rich_increase = ifelse(group == "richest", le + 3, le))
+
+# recalculate Old and New HDI for both scenarios
+
+# scenario 1: 3-year increase in life expectancy for the poorest countries
+hdi <- hdi %>%
+  mutate(
+    # Old HDI with life expectancy increase in poorest countries
+    health_old_poor = (LEi_poor_increase - 20) / (85 - 20),
+    HDI_old_poor = (health_old_poor + edu_old + in_old) / 3,
+    
+    # New HDI with life expectancy increase in poorest countries
+    health_new_poor = (LEi_poor_increase - 20) / (85 - 20),
+    HDI_new_poor = (health_new_poor * edu_new * in_new)^(1/3))
+
+# scenario 2: 3-year increase in life expectancy for the richest countries
+hdi <- hdi %>%
+  mutate(
+    # Old HDI with life expectancy increase in richest countries
+    health_old_rich = (LEi_rich_increase - 20) / (85 - 20),
+    HDI_old_rich = (health_old_rich + edu_old + in_old) / 3,
+    
+    # New HDI with life expectancy increase in richest countries
+    health_new_rich = (LEi_rich_increase - 20) / (85 - 20),
+    HDI_new_rich = (health_new_rich * edu_new * in_new)^(1/3))
+
+# calculate the average HDI for each scenario under both definitions
+avg_HDI_old_poor <- mean(hdi$HDI_old_poor, na.rm = TRUE)
+avg_HDI_old_rich <- mean(hdi$HDI_old_rich, na.rm = TRUE)
+avg_HDI_new_poor <- mean(hdi$HDI_new_poor, na.rm = TRUE)
+avg_HDI_new_rich <- mean(hdi$HDI_new_rich, na.rm = TRUE)
+
+comparison_results <- data.frame(
+  Scenario = c("Poorest Countries (3-year Increase)", "Richest Countries (3-year Increase)"),
+  Avg_HDI_Old = c(avg_HDI_old_poor, avg_HDI_old_rich),
+  Avg_HDI_New = c(avg_HDI_new_poor, avg_HDI_new_rich))
+
+# table 
+comparison_results %>%
+  mutate_if(is.numeric, ~ round(., 2)) %>% 
+  kable("latex", booktabs = TRUE, caption = "Comparison of Average HDI under Two Life Expectancy Increase Scenarios") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+Results Interpretation:
+
+-   Old HDI: The average HDI remains the same (0.8444133) under both scenarios, whether life expectancy is increased in the poorest or richest countries. This implies that under the old HDI, both policy options would yield the same result. Thus, if policymakers are using the old HDI and aim to maximize average HDI, they would find no advantage in prioritizing one option over the other.
+
+-   New HDI: The average HDI for the poorest countries scenario is slightly lower (0.7597211) than for the richest countries scenario (0.7607029). The slight difference implies that under the new HDI definition, prioritizing life expectancy increases in the richest
+    countries results in a marginally higher average HDI. Therefore, if policymakers are guided by the new HDI and aim to maximize the average HDI across countries, they would favor increasing life expectancy in the richest countries.
+
+**2.4b Policy comparison using the new version of HDI** 
+From the previous results, we see that the new HDI would favor increasing life expectancy in the richest countries (0.7607029) over the poorest countries (0.7597211).
+
+Thus, based on the new HDI, the policy option that maximises average HDI is to increase life expectancy in the richest countries.
+
+**2.4c Proof that the effect of an additional year of life expectancy on the HDI index of country i is equivalent to increasing its GDP by lnGDP**
+
+Firstly, the health index component in the old HDI is defined as:
+$Health\ Index=\frac{LE_i-20}{85-20}$
+
+This means an additional year of life expectancy increases this value
+by: $\Delta(Health\ Index)=\frac{1}{65}$
+
+Given the income index component in the old HDI:
+$Income\ Index = \frac{ln(GDP_i)-ln(100)}{ln(40,000)-ln(100)}$, an
+increase in the income index to match the change in health index (i.e.,
+$\frac{1}{65}$) can be found by solving
+$\Delta ln(GDP_i)^*=\frac{ln(40,000)-ln(100)}{65}$
+
+**2.4d Variation in GNI using new definition** Since the new HDI is computed using a geometric mean, the effect of an additional year of life expectancy interacts multiplicatively with the other components.
+
+The health index component from the new HDI is
+$Health\ Index=(\frac{LE_i-20}{85-20})^\frac{1}{3}$.
+
+-   This means an additional year of life expectancy increases this component by a factor of $(1+\frac{1}{65})^\frac{1}{3}\approx 1.0051$
+
+For the income component to have an equivalent effect, we need an increase in GNI that results in the same proportional increase in the overall HDI.
+
+-   Therefore, using the geometric mean adjustment, $\Delta ln(GNI_i)^*=\frac{ln(75,000)-ln(100)}{65}$
+
+**2.4e Criticism to address new version of HDI index**
+
+-   The main criticism of the new HDI, as derived from questions 2.4a and 2.4b, is that the geometric mean penalizes imbalances across health, education, and income more heavily than the arithmetic mean. While this approach aims to promote balanced development, it may unintentionally undervalue progress in specific components (like health) if other components lag behind. For countries focusing
+    resources on improving specific sectors where they are weakest, this can lead to an underrepresentation of their development progress.
+
+-   In contrast, the old HDI’s arithmetic mean allows for higher scores even with imbalances, which could better reflect the effects of targeted improvements in a particular sector.

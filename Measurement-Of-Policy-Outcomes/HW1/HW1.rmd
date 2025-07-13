@@ -1,0 +1,570 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = F, echo = TRUE, error=TRUE)
+library(haven)
+library(sandwich)
+library(lmtest)
+library(dplyr)
+library(tibble)
+library(printr)
+library(dplyr)
+library(knitr)
+library(tibble)
+```
+
+# 1. Design Effect
+## 1.1 Comment on formula
+
+\begin{center} design effect formula: $deff = 1 + (m-1) * p$ \end{center}
+
+Overall, the design effect measures the impact of clustering schools on the precision of estimates.
+
+- $\rho$ = within-school correlation ; `m` = number of students within each school 
+- $(m-1)*\rho$ = correlation between students in each PSU 
+- higher `m` = higher design effect (the bigger the number of respondents per school, the further away we move from random sampling) 
+- higher $\rho$ = higher design effect (design effect increases as within-school similarity between student increases)
+- deff is at least equal to 1 ; two-stage sampling always decreases the precision of estimates
+
+## 1.2 Integer value for m
+Given $\rho\approx0.22$  and $\frac{c_1}{c_2}\approx41$, <br>
+$$
+\begin{aligned}
+m* & =\sqrt{\frac{1-\rho}{\rho}*\frac{c_1}{c_2}} \\
+& =\sqrt{\frac{1-0.22}{0.22}*41} \\
+& \approx 12.1 (3 s.f.)
+\end{aligned}
+$$
+```{r, include = FALSE}
+sqrt(((1-0.22)/0.22)*41)
+```
+## 1.3 `m` in relation to $\frac{c_1}{c_2}$
+`m` increases as $\frac{c_1}{c_2}$ increases
+
+- When the cost ratio increases, it is more expensive to send an enumerator to a school compared to interviewing students. Thus, it would be more cost-effective to increase the (optimal) number of students sampled per school. 
+- Mathematically,  `m` is directly proportional to $\frac{c_1}{c_2}$.
+
+Alternatively, taking derivatives:
+$\frac{\delta m^*}{\delta \frac{c_1}{c_2}}$ = $0.5* \frac{1}{\sqrt{\frac{1-\rho}{\rho}*\frac{c_1}{c_2}}}*\frac{1-\rho}{\rho}$
+
+- If $\rho > 0$ and $\frac{c_1}{c_2} > 0$ then $\frac{\delta m^*}{\delta \frac{c_1}{c_2}} > 0$  
+- If $\rho < 0$ and $\frac{c_1}{c_2} < 0$ then $\frac{\delta m^*}{\delta \frac{c_1}{c_2}} < 0$ \
+- If $\rho < 0$ and $\frac{c_1}{c_2} > 0$ or $\rho > 0$ and $\frac{c_1}{c_2} < 0$ (no real number solution)
+
+Since both the fixed and variable costs for each school are positive and the intra PSU coefficient is positively defined, $\frac{\delta m^*}{\delta \frac{c_1}{c_2}} > 0$
+
+## 1.4 `m` in relation to $\rho$
+`m` decreases as $\rho$ increases
+
+- An increase in the intra-PSU correlation ($\rho$) means students within the same school are increasingly correlated. Since we want to reduce correlation between students, the optimal number of students sampled decreases to because adding more students would not improve precision of the estimate.
+- Mathematically, `m` is inversely proportional to $\rho$.
+
+Alternatively, taking derivatives: $\frac{\delta\frac{1-\rho}{\rho}}{\delta\rho}$ = $-\frac{1}{\rho^2}$
+
+This gives $\frac{\delta m^*}{\delta \rho}$ = $0.5* \frac{1}{\sqrt{\frac{1-\rho}{\rho}*\frac{c_1}{c_2}}}*-\frac{1}{\rho^2} * \frac{c_1}{c_2}$
+
+- If $\rho > 0$ and $\frac{c_1}{c_2} > 0$ then $\frac{\delta m^*}{\delta \rho} < 0$  
+- If $\rho < 0$ and $\frac{c_1}{c_2} < 0$ then $\frac{\delta m^*}{\delta \rho} < 0$  
+- If $\rho < 0$ and $\frac{c_1}{c_2} > 0$ or $\rho > 0$ and $\frac{c_1}{c_2} < 0$ (no real number solution)
+
+Therefore, $\frac{\delta m^*}{\delta \rho} < 0$
+
+# 2. Missing values
+```{r import, include=FALSE}
+score <- read_dta("Score_US.dta", encoding="utf-8")
+```
+
+## 2.1 Number of missing values
+```{r, echo=FALSE}
+missing_count <- sapply(score, function(x) sum(is.na(x)))
+missing_table <- data.frame(Variable = names(missing_count), Missing_Count = as.integer(missing_count))
+
+knitr::kable(missing_table, caption = "Missing Value Count per Variable")
+```
+
+## 2.2 Average scores in Reading and Mathematics
+```{r echo=FALSE}
+# means
+mean_reading <- mean(score$X4RSCALK1, na.rm = TRUE)
+mean_math    <- mean(score$X4MSCALK1, na.rm = TRUE)
+
+# standard errors
+se_reading <- sd(score$X4RSCALK1, na.rm = TRUE) / sqrt(sum(!is.na(score$X4RSCALK1)))
+se_math    <- sd(score$X4MSCALK1, na.rm = TRUE) / sqrt(sum(!is.na(score$X4MSCALK1)))
+
+mean_reading_rounded <- round(mean_reading, 1)
+mean_math_rounded    <- round(mean_math, 1)
+se_reading_rounded   <- round(se_reading, 3)
+se_math_rounded      <- round(se_math, 3)
+
+summary_table <- data.frame(
+  Subject = c("Reading", "Mathematics"),
+  Mean = c(mean_reading_rounded, mean_math_rounded),
+  Standard_Error = c(se_reading_rounded, se_math_rounded))
+
+knitr::kable(summary_table, caption = "Average Scores and Standard Errors (2011)")
+```
+
+### 2.2a Effect of Missing values
+```{r indicators, include=FALSE}
+# create an indicator for missing values in X4RSCALK1 (Reading)
+missing_reading <- is.na(score$X4RSCALK1)
+
+# create an indicator for missing values in X4MSCALK1 (Maths)
+missing_maths <- is.na(score$X4MSCALK1)
+```
+
+**Statistical test for child's sex:** Since `X_CHSEX_R` is categorical data, the chi-squared test of independence will be used: 
+```{r childs sex, echo=FALSE}
+# Chi-squared test between missing Reading and sex
+reading_sex <- chisq.test(table(missing_reading, score$X_CHSEX_R))
+
+# Chi-squared test between missing Maths and sex
+maths_sex <- chisq.test(table(missing_maths, score$X_CHSEX_R))
+
+chisq_results_table <- tibble::tibble(
+  Test = c("Reading vs Child's Sex", "Maths vs Child's Sex"),
+  `Chi-Squared` = round(c(reading_sex$statistic, maths_sex$statistic), 3),
+  `Degrees of Freedom` = c(reading_sex$parameter, maths_sex$parameter),
+  `p-value` = round(c(reading_sex$p.value, maths_sex$p.value), 4))
+
+knitr::kable(chisq_results_table, caption = "Chi-squared Test Results: Missingness vs Child's Sex")
+```
+
+Based on a significance level of 0.05, 
+
+- `Reading`: `p-value=0.7649` so we accept the null hypothesis that the missing values in Reading are independent of the child's sex.  
+- `Mathematics`: `p-value=0.7649` so we accept the null hypothesis that the missing values in Mathematics are independent of the child's sex.  
+
+**Statistical test for initial scores:** Since the initial scores are continuous, the t-test will be used:
+```{r initial scores, echo=FALSE}
+# Function to calculate SE
+calc_se <- function(x) sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+
+# Reading
+reading_group0 <- score$X1RSCALK1[missing_reading == 0]
+reading_group1 <- score$X1RSCALK1[missing_reading == 1]
+se_reading0 <- calc_se(reading_group0)
+se_reading1 <- calc_se(reading_group1)
+
+# Math
+maths_group0 <- score$X1MSCALK1[missing_maths == 0]
+maths_group1 <- score$X1MSCALK1[missing_maths == 1]
+se_maths0 <- calc_se(maths_group0)
+se_maths1 <- calc_se(maths_group1)
+
+# T-tests
+reading_ttest <- t.test(score$X1RSCALK1 ~ missing_reading, na.rm = TRUE)
+maths_ttest <- t.test(score$X1MSCALK1 ~ missing_maths, na.rm = TRUE)
+
+ttest_results <- tibble::tibble(
+  Test = c("T-Test: Initial Reading vs Missing", 
+           "T-Test: Initial Math vs Missing"),
+  `p-value` = round(c(reading_ttest$p.value, maths_ttest$p.value), 3),
+  `Mean in Group 0 (Not Missing)` = round(c(reading_ttest$estimate[1], maths_ttest$estimate[1]), 1),
+  `SE Group 0` = round(c(se_reading0, se_maths0), 2),
+  `Mean in Group 1 (Missing)` = round(c(reading_ttest$estimate[2], maths_ttest$estimate[2]), 1),
+  `SE Group 1` = round(c(se_reading1, se_maths1), 2))
+
+knitr::kable(ttest_results, caption = "T-Test Results: Initial Scores by Missingness (with Standard Errors)")
+```
+Based on a significance level of 0.05, 
+
+- `Reading`: `p-value = 4.711e-08` so we reject the null hypothesis that the missing values in Reading are independent of the child's initial scores.  
+- `Mathematics`:  `p-value = 6.216e-15` so we reject the null hypothesis that the missing values in Mathematics are independent of the child's initial scores.
+
+**Statistical test for parents' education:** Since parents' education is binary, either the chi-squared test or logistic regression can be used. As we are not interested in more nuanced insights at this stage, the chi-squared test will be used.
+```{r parents education, echo=FALSE}
+# Chi-squared tests
+chisq_reading_p1 <- chisq.test(table(missing_reading, score$XPARHIGHED_1))
+chisq_maths_p1   <- chisq.test(table(missing_maths, score$XPARHIGHED_1))
+chisq_reading_p2 <- chisq.test(table(missing_reading, score$XPARHIGHED_2))
+chisq_maths_p2   <- chisq.test(table(missing_maths, score$XPARHIGHED_2))
+
+chisq_results <- tibble::tibble(
+  Test = c("Reading vs Parent 1's Education", "Math vs Parent 1's Education", "Reading vs Parent 2's Education", 
+    "Math vs Parent 2's Education"),
+  `Chi-Squared` = round(
+    c(chisq_reading_p1$statistic, 
+      chisq_maths_p1$statistic, 
+      chisq_reading_p2$statistic, 
+      chisq_maths_p2$statistic), 3),
+  `Degrees of Freedom` = c(
+    chisq_reading_p1$parameter, 
+    chisq_maths_p1$parameter, 
+    chisq_reading_p2$parameter, 
+    chisq_maths_p2$parameter),
+  `p-value` = round(
+    c(chisq_reading_p1$p.value, 
+      chisq_maths_p1$p.value, 
+      chisq_reading_p2$p.value, 
+      chisq_maths_p2$p.value), 3))
+
+knitr::kable(chisq_results, caption = "Chi-squared Test Results: Missingness vs Parental Education")
+```
+Based on a significance level of 0.05,
+
+- `XPARHIGHED_1`: `p-value = 0.5456` so we accept the null hypothesis that the missing values in Reading are independent of parent 1's level of education.  
+- `XPARHIGHED_2`:  `p-value = 1.881e-05` so we reject the null hypothesis that the missing values in Mathematics are independent of parent 2's level of education.
+
+### 2.2b Biasness of the samples average scores given the structure of missing values
+The sample averages of scores at the end of the year in Reading and Mathematics are biased. The statistical tests revealed that missing values are related to the child’s initial test scores and parent 2’s education level, and not completely random.
+
+## 2.3 Propose a method to account for missing values
+One way to account for missing values would be to use an extreme imputation approach. For this question,
+a range of plausible values (rather than a single point estimate) will be constructed to get a better picture of how the missing data can impact our results. 
+
+```{r, echo=FALSE}
+# define lower and upper bounds for imputation using observed minimum and maximum values 
+lower_bound_reading <- min(score$X4RSCALK1, na.rm = TRUE)
+upper_bound_reading <- max(score$X4RSCALK1, na.rm = TRUE)
+
+lower_bound_math <- min(score$X4MSCALK1, na.rm = TRUE)
+upper_bound_math <- max(score$X4MSCALK1, na.rm = TRUE)
+
+# impute missing values using lower bound for Reading and Maths
+data_lower_impute <- score %>%
+  mutate(X4RSCALK1 = ifelse(is.na(X4RSCALK1), lower_bound_reading, X4RSCALK1),
+         X4MSCALK1 = ifelse(is.na(X4MSCALK1), lower_bound_math, X4MSCALK1))
+
+# impute missing values with upper bound for Reading and Maths
+data_upper_impute <- score %>%
+  mutate(X4RSCALK1 = ifelse(is.na(X4RSCALK1), upper_bound_reading, X4RSCALK1),
+         X4MSCALK1 = ifelse(is.na(X4MSCALK1), upper_bound_math, X4MSCALK1))
+
+# average for both imputation strategies
+mean_lower_reading <- round(mean(data_lower_impute$X4RSCALK1), 1)
+mean_upper_reading <- round(mean(data_upper_impute$X4RSCALK1), 1)
+
+mean_lower_math <- round(mean(data_lower_impute$X4MSCALK1), 1)
+mean_upper_math <- round(mean(data_upper_impute$X4MSCALK1), 1)
+
+# confidence interval for Reading and Maths scores
+ci_reading <- c(mean_lower_reading, mean_upper_reading)
+ci_math <- c(mean_lower_math, mean_upper_math)
+```
+
+```{r echo=FALSE}
+# create table using tibble (preserves spaces in column names)
+ci_table <- tibble(
+  Subject = c("Reading", "Math"),
+  `Lower Bound Mean` = c(mean_lower_reading, mean_lower_math), `Upper Bound Mean` = c(mean_upper_reading, mean_upper_math))
+
+kable(ci_table, caption = "Mean Scores After Imputation")
+```
+
+## 2.4 Compare average scores in Reading and Mathematics of children whose parent 1 has a higher level of education (i.e XPARHIGHED_1 == 1)        
+NTS: put t-stat and SE back into table 
+
+```{r echo=FALSE}
+# Means and SEs for each group and comparison
+mean_se <- function(score_var, group_var) {
+  group0 <- score_var[group_var == 0]
+  group1 <- score_var[group_var == 1]
+  c(mean0 = mean(group0, na.rm = TRUE),
+    se0 = calc_se(group0),
+    mean1 = mean(group1, na.rm = TRUE),
+    se1 = calc_se(group1))}
+
+res1 <- mean_se(score$X4RSCALK1, score$XPARHIGHED_1)
+res2 <- mean_se(score$X4MSCALK1, score$XPARHIGHED_1)
+res3 <- mean_se(score$X4RSCALK1, score$XPARHIGHED_2)
+res4 <- mean_se(score$X4MSCALK1, score$XPARHIGHED_2)
+
+# T-tests
+t_test_reading_parent1 <- t.test(X4RSCALK1 ~ XPARHIGHED_1, data = score, na.rm = TRUE)
+t_test_maths_parent1   <- t.test(X4MSCALK1 ~ XPARHIGHED_1, data = score, na.rm = TRUE)
+t_test_reading_parent2 <- t.test(X4RSCALK1 ~ XPARHIGHED_2, data = score, na.rm = TRUE)
+t_test_maths_parent2   <- t.test(X4MSCALK1 ~ XPARHIGHED_2, data = score, na.rm = TRUE)
+
+# Format mean (SE)
+format_mean_se <- function(mean, se) {
+  paste0(round(mean, 1), " (", round(se, 2), ")")}
+
+results_table <- tibble::tibble(
+  Test = c("Parent 1: Reading", "Parent 1: Maths", "Parent 2: Reading", "Parent 2: Maths"),
+  `Group 0: Mean (SE)` = c(format_mean_se(res1["mean0"], res1["se0"]),
+                           format_mean_se(res2["mean0"], res2["se0"]),
+                           format_mean_se(res3["mean0"], res3["se0"]),
+                           format_mean_se(res4["mean0"], res4["se0"])),
+  `Group 1: Mean (SE)` = c(format_mean_se(res1["mean1"], res1["se1"]),
+                           format_mean_se(res2["mean1"], res2["se1"]),
+                           format_mean_se(res3["mean1"], res3["se1"]),
+                           format_mean_se(res4["mean1"], res4["se1"])),
+  `t-statistic` = round(c(t_test_reading_parent1$statistic, t_test_maths_parent1$statistic,
+                          t_test_reading_parent2$statistic, t_test_maths_parent2$statistic), 2),
+  `p-value` = round(c(t_test_reading_parent1$p.value, t_test_maths_parent1$p.value,
+                      t_test_reading_parent2$p.value, t_test_maths_parent2$p.value), 3))
+
+knitr::kable(results_table, caption = "Comparison of Scores by Parent Education (Mean (SE), t-statistics, and p-values)")
+```
+
+Comment: Overall, p-values across all four t.tests are much lower than the significance level of 0.05. Therefore, we reject the null hypothesis as the differences in scores are statistically significant. Specifically, children whose parents (both Parent 1 and Parent 2) have more than a high school education tend to score significantly higher in both Reading and Maths than those whose parents do not.
+
+## 2.5 Show that probability to be sampled is same for all students
+Given $N_i$ = `N_students`= no. of students in each school and $n$ = `total_students`= total no. of students across all schools, $m$ = total number of schools
+
+- $p(\text{selecting a school based on its size})$ = $p_i=\frac{N_i}{\sum_{j=1}^m N_j}$
+- $p(\text{selecting a student from each school | school is selected})$ = $\frac{20}{N_i}$
+$$ 
+\begin{aligned}
+\therefore \ & p(\text{selecting a student}) \\ 
+& = p(\text{selecting a school})*p(\text{selecting a student from each school | school is selected}) \\
+& = \frac{N_i}{\sum_{j=1}^m N_j}*\frac{20}{N_i} \\
+& =\frac{20}{\sum_{j=1}^m N_j}
+\end{aligned}
+$$
+i.e. probability of selecting a student is independent of the school they attend == probability of being sampled is the same for all students. 
+
+```{r proof, include=FALSE}
+# number of students in each school
+school_size <- score %>%
+  group_by(S4_ID) %>%
+  summarise(N_students = n())
+
+total_students <- sum(school_size$N_students) # total number of students across all schools
+n_sampled_students <- 20 # number of students sampled per school = 20
+
+# probability of selecting each school based on its size
+school_size <- school_size %>%
+  mutate(p_school = N_students / total_students)
+
+# probability of selecting a student from each school
+school_size <- school_size %>%
+  mutate(p_student = p_school * (n_sampled_students / N_students))
+
+# results (to verify)
+print(school_size)
+```
+
+## 2.6 Average scores adjusted for SE (for clustering at school level)
+```{r, include=FALSE}
+# lm for Reading and Maths scores
+model_reading <- lm(X4RSCALK1 ~ 1, data = score)  # Intercept-only model to get the mean
+model_math <- lm(X4MSCALK1 ~ 1, data = score)
+
+# adjust standard errors for clustering at the school level
+clustered_se_reading <- coeftest(model_reading, vcov = vcovCL, cluster = ~score$S4_ID)
+clustered_se_math <- coeftest(model_math, vcov = vcovCL, cluster = ~score$S4_ID)
+
+mean_reading <- round(coef(model_reading)[1], 1)
+se_reading <- round(clustered_se_reading[1, 2], 2)
+mean_math <- round(coef(model_math)[1], 1)
+se_math <- round(clustered_se_math[1, 2], 2)
+```
+
+```{r, echo=FALSE}
+# Summary table
+score_table <- tibble(
+  Subject = c("Reading", "Math"),
+  `Mean (SE)` = paste0(c(mean_reading, mean_math), " (", sprintf("%.2f", c(se_reading, se_math)), ")"))
+kable(score_table, caption = "Average Scores and Clustered Standard Errors by School")
+```
+
+## 2.7 Comparison of estimates with and without clustering
+
+```{r, include=FALSE}
+# 1. Standard Errors without clustering (i.e., regular OLS standard errors)
+se_reading_standard <- summary(model_reading)$coefficients[1, 2]  # Standard error of intercept
+se_math_standard <- summary(model_math)$coefficients[1, 2]
+
+# 2. Standard Errors with clustering (adjusting for school-level clusters using vcovCL)
+se_reading_clustered <- coeftest(model_reading, vcov = vcovCL, cluster = ~score$S4_ID)[1, 2]
+se_math_clustered <- coeftest(model_math, vcov = vcovCL, cluster = ~score$S4_ID)[1, 2]
+```
+```{r, echo=FALSE}
+# comparison table
+se_comparison <- tibble(
+  Subject = c("Reading", "Math"),
+  `SE (Without Clustering)` = c(sprintf("%.2f", se_reading_standard), sprintf("%.2f", se_math_standard)),
+  `SE (With Clustering)` = c(sprintf("%.2f", se_reading_clustered), sprintf("%.2f", se_math_clustered)))
+
+kable(se_comparison,
+      caption = "Comparison of Standard Errors With and Without Clustering", digits = 2,  align = c("l", "c", "c"))
+```
+Overall, the standard errors with clustering are systematically higher than those without clustering. This is because clustering accounts for the fact that students within the same school may be similar (intra-cluster correlation), which reduces the amount of independent information. Therefore, the standard errors increase when this correlation is considered. 
+
+If we proceed without clustering, we are assuming that all observations are independent, which can: 
+
+1. Underestimate the standard errors - this can lead to narrower confidence intervals and therefore statistically incorrect conclusion 
+2. Give a false sense of precision in the estimates - having estimates appear more precise than they actually are can lead to biased inferences
+
+One might still opt for a sampling design that leads to clustering due to: 
+
+1. Costs - Clustering is more economical than surveying students from different schools/regions as it reduces expenses required for data collection. 
+2. Practicality - In contexts like educational research, clusters may be the only units feasible for a sampling design. Schools, for example, are natural clusters. Clustering can aid in further statistical understanding of variability within and between clusters.
+
+## 2.8 Compare average scores of students whose parents have different educational levels while accounting for clustering
+The lm models can be found in my .rmd file. 
+```{r echo=FALSE}
+models <- list(
+  "Reading (P1)"     = lm(X4RSCALK1 ~ XPARHIGHED_1, data = score),  "Mathematics (P1)" = lm(X4MSCALK1 ~ XPARHIGHED_1, data = score),
+  "Reading (P2)"     = lm(X4RSCALK1 ~ XPARHIGHED_2, data = score),  "Mathematics (P2)" = lm(X4MSCALK1 ~ XPARHIGHED_2, data = score))
+
+# cluster-robust SEs for each model
+model_results <- lapply(models, function(mod) {
+  coeftest(mod, vcov = vcovCL, cluster = score$S4_ID)})
+
+results <- purrr::map2_dfr(names(model_results), model_results, ~ {
+  tibble(Model = .x, Intercept = .y[1, "Estimate"], Effect = .y[2, "Estimate"], SE_Intercept = .y[1, "Std. Error"], SE_Effect = .y[2, "Std. Error"], p_value = .y[2, "Pr(>|t|)"])})
+
+results_clean <- results %>%
+  mutate(
+    Intercept = round(Intercept, 2),
+    Effect = round(Effect, 2),
+    `SE (Intercept)` = round(SE_Intercept, 2),
+    `SE (Effect)` = round(SE_Effect, 2),
+    `p-value` = formatC(p_value, format = "f", digits = 3)) %>%
+  select(Model, Intercept, Effect, `SE (Intercept)`, `SE (Effect)`, `p-value`)
+
+kable(
+  results_clean,
+  align = c("l", rep("c", 5)),
+  caption = "Regression Results: Effect of Parent Education on Reading and Mathematics Scores")
+```
+
+Results:
+The regression results show that children whose parents (both Parent 1 and Parent 2) have a higher education level score significantly higher in both Reading and Mathematics at the end of the academic year.
+
+- Statistical Significance: All p-values are effectively zero (p < 0.001), indicating that the differences in scores by parent education level are highly statistically significant after accounting for clustering.
+
+- Effect Size: The estimated increase in scores associated with having a parent with a higher education level is approximately 8 points for both Reading and Mathematics, and this effect is consistent across both parents.
+
+- Standard Errors: The cluster-robust standard errors are slightly larger than typical standard errors without clustering adjustment, reflecting the appropriate correction for within-cluster correlation. Despite this, the effects remain highly significant.
+
+- Comparison to Earlier Results: These findings are consistent with the results from question 4. However, by adjusting for clustering, the standard errors are more reliable, strengthening the robustness of the conclusions.
+
+
+## 2.9 Regress the final scores in Reading and Mathematics without controlling for the initial scores measured at the beginning of the kindergarten year
+The lm models can be found in my .rmd file.
+```{r echo=FALSE}
+lm_reading_p1 <- lm(X4RSCALK1 ~ XPARHIGHED_1, data = score)
+lm_maths_p1   <- lm(X4MSCALK1 ~ XPARHIGHED_1, data = score)
+
+lm_reading_p2 <- lm(X4RSCALK1 ~ XPARHIGHED_2, data = score)
+lm_maths_p2   <- lm(X4MSCALK1 ~ XPARHIGHED_2, data = score)
+
+# cluster-robust standard errors (clustered by S4_ID)
+reading_se_p1 <- coeftest(lm_reading_p1, vcov = vcovCL, cluster = score$S4_ID)
+maths_se_p1   <- coeftest(lm_maths_p1, vcov = vcovCL, cluster = score$S4_ID)
+reading_se_p2 <- coeftest(lm_reading_p2, vcov = vcovCL, cluster = score$S4_ID)
+maths_se_p2   <- coeftest(lm_maths_p2, vcov = vcovCL, cluster = score$S4_ID)
+
+results <- tibble(
+  Model = c("Reading (P1)", "Mathematics (P1)", "Reading (P2)", "Mathematics (P2)"),
+  Intercept = c(reading_se_p1[1, "Estimate"], maths_se_p1[1, "Estimate"], 
+                reading_se_p2[1, "Estimate"], maths_se_p2[1, "Estimate"]),
+  Effect = c(reading_se_p1[2, "Estimate"], maths_se_p1[2, "Estimate"], reading_se_p2[2, "Estimate"], maths_se_p2[2, "Estimate"]),
+  SE_Intercept = c(reading_se_p1[1, "Std. Error"], maths_se_p1[1, "Std. Error"], reading_se_p2[1, "Std. Error"], maths_se_p2[1, "Std. Error"]),
+  SE_Effect = c(reading_se_p1[2, "Std. Error"], maths_se_p1[2, "Std. Error"], reading_se_p2[2, "Std. Error"], maths_se_p2[2, "Std. Error"]),
+  p_value = c(reading_se_p1[2, "Pr(>|t|)"], maths_se_p1[2, "Pr(>|t|)"], reading_se_p2[2, "Pr(>|t|)"], maths_se_p2[2, "Pr(>|t|)"]))
+
+results_clean <- results %>%
+  mutate(
+    Intercept = round(Intercept, 2),
+    Effect = round(Effect, 2),
+    `SE (Intercept)` = round(SE_Intercept, 2),
+    `SE (Effect)` = round(SE_Effect, 2),
+    `p-value` = formatC(p_value, format = "f", digits = 3)) %>%
+  select(Model, Intercept, Effect, `SE (Intercept)`, `SE (Effect)`, `p-value`)
+
+kable(results_clean, align = c("l", rep("c", 5)), caption = "Cluster-Robust Regression Results: Effect of Parent Education on Reading and Math Scores")
+```
+Results:
+
+- Parental Education Effects: Both Parent 1’s and Parent 2’s education levels are significant predictors of children’s Reading and Mathematics scores at the end of the academic year.
+
+- Effect Sizes: Children whose parents have higher education score approximately 8 points higher in both Reading and Mathematics compared to their peers with less-educated parents.
+
+- Statistical Significance: All effects are highly significant (p < 0.001), and standard errors account for clustering at the school level, giving confidence in these findings.
+
+## 2.10 Regress final Reading and Maths scores, controlling for the initial scores
+The lm models can be found in my .rmd file.
+```{r, echo=FALSE}
+lm_reading_control <- lm(X4RSCALK1 ~ X_CHSEX_R + XPARHIGHED_1 + XPARHIGHED_2 + X4AGE + X4PUBPRI + X4LANGST + X1RSCALK1, data = score)
+lm_maths_control <- lm(X4MSCALK1 ~ X_CHSEX_R + XPARHIGHED_1 + XPARHIGHED_2 + X4AGE + X4PUBPRI + X4LANGST + X1MSCALK1, data = score)
+
+reading_coef <- summary(lm_reading_control)$coefficients
+maths_coef <- summary(lm_maths_control)$coefficients
+
+control_results <- tibble(
+  Variable = rownames(reading_coef),
+  `Reading Estimate` = round(reading_coef[, "Estimate"], 2),
+  `Reading SE` = round(reading_coef[, "Std. Error"], 2),
+  `Reading p-value` = formatC(reading_coef[, "Pr(>|t|)"], format = "f", digits = 2),
+  `Maths Estimate` = round(maths_coef[, "Estimate"], 2),
+  `Maths SE` = round(maths_coef[, "Std. Error"], 2),
+  `Maths p-value` = formatC(maths_coef[, "Pr(>|t|)"], format = "f", digits = 2))
+
+kable(control_results, caption = "Regression Results Controlling for Initial Scores", align = c("l", rep("c", 6)), digits = 2, include.rownames = FALSE)
+```
+Results:
+
+Reading Scores (X4RSCALK1) Model:
+
+- Significant predictors:
+
+  - Being male decreases Reading scores by approximately 1.99 points (p < 0.001).
+
+  - Parent 1’s higher education level increases Reading scores by 2.40 points (p < 0.001).
+
+  - Parent 2’s higher education level increases Reading scores by 1.83 points (p < 0.001).
+
+  - Initial Reading score strongly predicts final Reading score, with each point increasing the final score by 0.76 points (p < 0.001).
+
+- Model fit: This model explains about 44.4% of the variance in Reading scores (R² ≈ 0.44).
+
+Maths Scores (X4MSCALK1) Model:
+
+- Significant predictors:
+
+  - Being male increases Maths scores by 0.70 points (p < 0.001).
+
+  - Parent 1’s higher education level increases Maths scores by 1.11 points (p < 0.001).
+
+  - Parent 2’s higher education level increases Maths scores by 1.32 points (p < 0.001).
+
+  - Initial Maths score strongly predicts final Maths score, with each point increasing the final score by 0.85 points (p < 0.001).
+
+- Model fit: This model explains about 57.3% of the variance in Maths scores (R² ≈ 0.57).
+
+It is important to control for initial scores for several reasons:
+
+- Strong predictor of final scores:
+  - The initial scores (at the beginning of kindergarten) strongly predict the final scores at the end of the academic year, capturing a large part of the variation in student outcomes.
+
+- Isolates the effect of other variables:
+  - Controlling for initial scores accounts for baseline differences in ability or preparedness, reducing omitted variable bias. This ensures that the estimated effects of parent education, sex, and other covariates reflect their true impact on score changes rather than initial achievement differences.
+
+- Improves model accuracy and fit:
+  - Including initial scores significantly increases the explanatory power (R²) of the models, resulting in better fit and more reliable, precise coefficient estimates.
+    
+---
+
+\begin{center}Reading Scores (X4RSCALK1) Model:\end{center}
+
+    Significant Predictors:
+       - X_CHSEX_R: Being male decreases Reading scores by 1.99 points (p < 2e-16).
+       - XPARHIGHED_1: Parent 1’s higher education level increases Reading scores by 2.39 points (p < 2e-16).
+       - XPARHIGHED_2: Parent 2’s higher education level increases Reading scores by 1.83 points (p < 8.47e-16).
+       - X1RSCALK1: The initial Reading score has a strong positive effect, increasing the current Reading score by 0.76 points for every point in the initial score (p < 2e-16).
+    R²: The model explains about 44.36% of the variance in Reading scores.
+
+\begin{center}Maths Scores (X4MSCALK1) Model:\end{center}
+
+    Significant Predictors:
+       - X_CHSEX_R: Being male increases Math scores by 0.70 points (p < 4.41e-05).
+       - XPARHIGHED_1: Parent 1’s higher education level increases Math scores by 1.11 points (p = 1.12e-07).
+       - XPARHIGHED_2: Parent 2’s higher education level increases Maths scores by 1.32 points (p = 5.62e-11).
+       - X1MSCALK1: The initial Maths score has a very strong positive effect, increasing the current Maths score by 0.85 points for every point in the initial score (p < 2e-16).
+    R²: The model explains about 57.27% of the variance in Math scores.
+
+
+It is important to control for initial scores for several reasons:
+
+1. Initial scores are strong predictors of final scores
+- In the Reading model, X1RSCALK1 has a coefficient of 0.7611, meaning that every point in the initial Reading score adds 0.76 points to the final Reading score. In the Maths model, X1MSCALK1 has an even stronger coefficient of 0.8528.
+
+2. Impact of other variables
+- Controlling for initial scores reduces the impact of other variables as part of the variance that can be attributed to these factors are already explained by the initial score. In the same vein, it controls for confounding variables and attributes less variability to other variables than they actually explain
+
+3. Model Fit:
+- The adjusted R² values increase significantly when controlling for initial scores (44.36% for Reading, 57.27% for Math). This means that the initial scores explain a large portion of the variation in the final scores. Thus, this leads to a better-fitting model with more precise estimates.
