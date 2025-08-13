@@ -1,0 +1,7 @@
+city,total_bookings,total_revenue,avg_rating
+Amsterdam,1,180.0,4.9
+Berlin,1,660.0,4.8
+London,1,1000.0,5.0
+New York,1,1500.0,4.7
+Paris,1,,
+Tokyo,1,360.0,4.5
